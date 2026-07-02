@@ -1,4 +1,4 @@
-# walras-nexuscore
+# nexuscore-lib
 
 Core runtime components extracted from `nautilus_trader` for use in Walras.
 
