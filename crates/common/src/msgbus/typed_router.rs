@@ -20,13 +20,13 @@
 
 use std::{
     cmp::Ordering,
+    collections::HashMap,
     fmt::Debug,
-    hash::{Hash, Hasher},
+    hash::{BuildHasherDefault, Hash, Hasher},
 };
 
-use indexmap::IndexMap;
 use smallvec::SmallVec;
-use ustr::Ustr;
+use ustr::{IdentityHasher, Ustr};
 
 use super::{
     matching::is_matching_backtracking,
@@ -105,6 +105,17 @@ impl<T: 'static> Hash for TypedSubscription<T> {
     }
 }
 
+/// Number of matching handlers stored inline (no heap allocation) per cached topic.
+const TOPIC_CACHE_INLINE: usize = 16;
+
+/// Hasher for the topic cache.
+///
+/// Topics are interned [`Ustr`]s that carry a precomputed hash, so an identity
+/// hasher forwards that hash directly into the map — avoiding a full re-hash
+/// (e.g. `SipHash`) on every publish, which dominates the single-subscriber
+/// dispatch cost.
+type TopicHasher = BuildHasherDefault<IdentityHasher>;
+
 /// Routes messages of type `T` to subscribed handlers based on topic patterns.
 ///
 /// Supports wildcard patterns (`*` and `?`) and priority-based ordering.
@@ -113,8 +124,11 @@ impl<T: 'static> Hash for TypedSubscription<T> {
 pub struct TopicRouter<T: 'static> {
     /// All active subscriptions.
     pub(crate) subscriptions: Vec<TypedSubscription<T>>,
-    /// Cache mapping topics to matching subscription indices (inline for ≤64 handlers).
-    topic_cache: IndexMap<MStr<Topic>, SmallVec<[usize; 64]>>,
+    /// Cache mapping topics directly to their matching handlers, in priority
+    /// order. Storing handler clones (cheap `Rc` bumps, built once per topic)
+    /// lets `publish` dispatch straight from the cache without the extra
+    /// indirection and bounds check of indexing back into `subscriptions`.
+    topic_cache: HashMap<MStr<Topic>, SmallVec<[TypedHandler<T>; TOPIC_CACHE_INLINE]>, TopicHasher>,
 }
 
 impl<T: 'static> Default for TopicRouter<T> {
@@ -129,7 +143,7 @@ impl<T: 'static> TopicRouter<T> {
     pub fn new() -> Self {
         Self {
             subscriptions: Vec::new(),
-            topic_cache: IndexMap::new(),
+            topic_cache: HashMap::default(),
         }
     }
 
@@ -222,43 +236,33 @@ impl<T: 'static> TopicRouter<T> {
     /// Returns whether there are subscribers for the topic.
     #[must_use]
     pub fn has_subscribers(&self, topic: MStr<Topic>) -> bool {
-        self.get_matching_indices(topic).map_or_else(
-            || !self.find_matches(topic).is_empty(),
-            |indices| !indices.is_empty(),
-        )
+        match self.topic_cache.get(&topic) {
+            Some(handlers) => !handlers.is_empty(),
+            None => self
+                .subscriptions
+                .iter()
+                .any(|sub| is_matching_backtracking(topic, sub.pattern)),
+        }
     }
 
     /// Returns the count of subscribers for a topic.
     #[must_use]
     pub fn subscriber_count(&self, topic: MStr<Topic>) -> usize {
-        self.get_matching_indices(topic)
-            .map_or_else(|| self.find_matches(topic).len(), |indices| indices.len())
+        match self.topic_cache.get(&topic) {
+            Some(handlers) => handlers.len(),
+            None => self
+                .subscriptions
+                .iter()
+                .filter(|sub| is_matching_backtracking(topic, sub.pattern))
+                .count(),
+        }
     }
 
     /// Publishes a message to all handlers subscribed to matching patterns.
     pub fn publish(&mut self, topic: MStr<Topic>, message: &T) {
-        // Split borrow to avoid copying indices
-        let Self {
-            subscriptions,
-            topic_cache,
-        } = self;
-
-        let indices = topic_cache.entry(topic).or_insert_with(|| {
-            subscriptions
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, sub)| {
-                    if is_matching_backtracking(topic, sub.pattern) {
-                        Some(idx)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        });
-
-        for &idx in indices.iter() {
-            subscriptions[idx].handler.handle(message);
+        let handlers = self.matching_handlers(topic);
+        for handler in handlers.iter() {
+            handler.0.handle(message);
         }
     }
 
@@ -268,29 +272,7 @@ impl<T: 'static> TopicRouter<T> {
     /// Note: Allocates a Vec on each call. For hot paths, prefer the thread-local
     /// buffer pattern used by `publish_*` functions.
     pub fn get_matching_handlers(&mut self, topic: MStr<Topic>) -> Vec<TypedHandler<T>> {
-        let indices: SmallVec<[usize; 64]> = self
-            .get_or_compute_matching_indices(topic)
-            .iter()
-            .copied()
-            .collect();
-        indices
-            .into_iter()
-            .map(|idx| self.subscriptions[idx].handler.clone())
-            .collect()
-    }
-
-    /// Gets cached matching indices for a topic, if available.
-    fn get_matching_indices(&self, topic: MStr<Topic>) -> Option<&[usize]> {
-        self.topic_cache.get(&topic).map(|v| v.as_slice())
-    }
-
-    /// Gets or computes matching subscription indices for a topic.
-    pub(crate) fn get_or_compute_matching_indices(&mut self, topic: MStr<Topic>) -> &[usize] {
-        if !self.topic_cache.contains_key(&topic) {
-            let indices = self.find_matches(topic);
-            self.topic_cache.insert(topic, indices);
-        }
-        self.topic_cache.get(&topic).unwrap()
+        self.matching_handlers(topic).to_vec()
     }
 
     /// Fills a buffer with handlers matching a topic.
@@ -299,43 +281,30 @@ impl<T: 'static> TopicRouter<T> {
         topic: MStr<Topic>,
         buf: &mut SmallVec<[TypedHandler<T>; 64]>,
     ) {
+        buf.extend(self.matching_handlers(topic).iter().cloned());
+    }
+
+    /// Returns the cached slice of matching handlers for `topic`, computing and
+    /// caching it (in priority order) on first access.
+    fn matching_handlers(
+        &mut self,
+        topic: MStr<Topic>,
+    ) -> &SmallVec<[TypedHandler<T>; TOPIC_CACHE_INLINE]> {
+        // Split borrow so the cache-miss closure can read `subscriptions`.
         let Self {
             subscriptions,
             topic_cache,
         } = self;
 
-        let indices = topic_cache.entry(topic).or_insert_with(|| {
+        topic_cache.entry(topic).or_insert_with(|| {
+            // `subscriptions` is kept sorted by priority, so filtering here
+            // preserves the correct dispatch order.
             subscriptions
                 .iter()
-                .enumerate()
-                .filter_map(|(idx, sub)| {
-                    if is_matching_backtracking(topic, sub.pattern) {
-                        Some(idx)
-                    } else {
-                        None
-                    }
-                })
+                .filter(|sub| is_matching_backtracking(topic, sub.pattern))
+                .map(|sub| sub.handler.clone())
                 .collect()
-        });
-
-        for &idx in indices.iter() {
-            buf.push(subscriptions[idx].handler.clone());
-        }
-    }
-
-    /// Finds subscription indices matching a topic (without caching).
-    fn find_matches(&self, topic: MStr<Topic>) -> SmallVec<[usize; 64]> {
-        self.subscriptions
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, sub)| {
-                if is_matching_backtracking(topic, sub.pattern) {
-                    Some(idx)
-                } else {
-                    None
-                }
-            })
-            .collect()
+        })
     }
 
     /// Invalidates cache entries that could be affected by a pattern change.

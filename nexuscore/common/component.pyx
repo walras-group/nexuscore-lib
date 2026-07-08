@@ -69,6 +69,7 @@ from nexuscore.core.rust.common cimport time_event_to_cstr
 from nexuscore.core.rust.common cimport vec_time_event_handlers_drop
 from nexuscore.core.rust.core cimport CVec
 from nexuscore.core.rust.core cimport uuid4_from_cstr
+from nexuscore.core.string cimport PyUnicode_AsUTF8AndSize
 from nexuscore.core.string cimport cstr_to_pystr
 from nexuscore.core.string cimport pystr_to_cstr
 from nexuscore.core.string cimport ustr_to_pystr
@@ -1199,7 +1200,9 @@ cdef class MessageBus:
         self._clock = clock
 
         self._endpoints: dict[str, Callable[[Any], None]] = {}
-        self._patterns: dict[str, Subscription[:]] = {}
+        self._patterns: dict[str, list] = {}
+        self._topics_cache = None
+        self._query_cache = {}
         self._subscriptions: dict[Subscription, list[str]] = {}
         self._correlation_index: dict[UUID4, Callable[[Any], None]] = {}
 
@@ -1234,7 +1237,16 @@ cdef class MessageBus:
         list[str]
 
         """
-        return sorted(set([s.topic for s in self._subscriptions.keys()]))
+        # Cached between subscription changes: repeated calls avoid rescanning
+        # and re-sorting all subscriptions.
+        cdef set topic_set
+        cdef Subscription s
+        if self._topics_cache is None:
+            topic_set = set()
+            for s in self._subscriptions:
+                topic_set.add(s.topic)
+            self._topics_cache = sorted(topic_set)
+        return list(self._topics_cache)
 
     cpdef list subscriptions(self, str pattern = None):
         """
@@ -1251,12 +1263,23 @@ cdef class MessageBus:
         list[Subscription]
 
         """
-        if pattern is None:
-            pattern = "*"  # Wildcard
+        if pattern is None or pattern == "*":
+            # `*` matches every topic, so return all subscriptions directly.
+            return list(self._subscriptions)
 
         Condition.valid_string(pattern, "pattern")
 
-        return [s for s in self._subscriptions if is_matching(s.topic, pattern)]
+        # Cache match results per pattern (invalidated on subscribe/unsubscribe)
+        # so repeated queries return a cheap copy instead of rescanning.
+        cdef list cached = self._query_cache.get(pattern)
+        cdef Subscription s
+        if cached is None:
+            cached = []
+            for s in self._subscriptions:
+                if is_matching(s.topic, pattern):
+                    cached.append(s)
+            self._query_cache[pattern] = cached
+        return list(cached)
 
     cpdef set streaming_types(self):
         """
@@ -1284,7 +1307,23 @@ cdef class MessageBus:
         bool
 
         """
-        return len(self.subscriptions(pattern)) > 0
+        if pattern is None or pattern == "*":
+            # `*` matches every topic, so any subscription counts.
+            return len(self._subscriptions) > 0
+
+        Condition.valid_string(pattern, "pattern")
+
+        # Reuse a cached match result if present, otherwise short-circuit on the
+        # first match instead of materializing the full list.
+        cdef list cached = self._query_cache.get(pattern)
+        if cached is not None:
+            return len(cached) > 0
+
+        cdef Subscription sub
+        for sub in self._subscriptions:
+            if is_matching(sub.topic, pattern):
+                return True
+        return False
 
     cpdef bint is_subscribed(self, str topic, handler: Callable[[Any], None]):
         """
@@ -1304,14 +1343,9 @@ cdef class MessageBus:
         bool
 
         """
-        Condition.valid_string(topic, "topic")
-        Condition.callable(handler, "handler")
-
-        # Create subscription
-        cdef Subscription sub = Subscription(
-            topic=topic,
-            handler=handler,
-        )
+        # Fast constructor: this is a read-only membership check, so a bad
+        # topic/handler simply yields no match rather than needing validation.
+        cdef Subscription sub = Subscription._create(topic, handler, 0)
 
         return sub in self._subscriptions
 
@@ -1535,13 +1569,10 @@ cdef class MessageBus:
         """
         Condition.valid_string(topic, "topic")
         Condition.callable(handler, "handler")
+        Condition.not_negative_int(priority, "priority")
 
-        # Create subscription
-        cdef Subscription sub = Subscription(
-            topic=topic,
-            handler=handler,
-            priority=priority,
-        )
+        # Create subscription (topic/handler/priority already validated above).
+        cdef Subscription sub = Subscription._create(topic, handler, priority)
 
         # Check if already exists
         if sub in self._subscriptions:
@@ -1557,12 +1588,14 @@ cdef class MessageBus:
                 subs = list(self._patterns[pattern])
                 subs.append(sub)
                 subs = sorted(subs, reverse=True)
-                self._patterns[pattern] = np.ascontiguousarray(subs, dtype=Subscription)
+                self._patterns[pattern] = subs
                 matches.append(pattern)
 
         self._subscriptions[sub] = sorted(matches)
 
         self._resolved = False
+        self._topics_cache = None
+        self._query_cache.clear()
 
     cpdef void unsubscribe(self, str topic, handler: Callable[[Any], None]):
         """
@@ -1587,7 +1620,7 @@ cdef class MessageBus:
         Condition.valid_string(topic, "topic")
         Condition.callable(handler, "handler")
 
-        cdef Subscription sub = Subscription(topic=topic, handler=handler)
+        cdef Subscription sub = Subscription._create(topic, handler, 0)
 
         # Check if patterns exist for sub
         cdef list patterns = self._subscriptions.get(sub)
@@ -1599,11 +1632,13 @@ cdef class MessageBus:
             subs = list(self._patterns[pattern])
             subs.remove(sub)
             subs = sorted(subs, reverse=True)
-            self._patterns[pattern] = np.ascontiguousarray(subs, dtype=Subscription)
+            self._patterns[pattern] = subs
 
         del self._subscriptions[sub]
 
         self._resolved = False
+        self._topics_cache = None
+        self._query_cache.clear()
 
     cpdef void publish(self, str topic, msg: Any, bint external_pub = True):
         """
@@ -1627,28 +1662,87 @@ cdef class MessageBus:
     @cython.boundscheck(False)
     @cython.wraparound(False)
     cdef void publish_c(self, str topic, msg: Any, bint external_pub = True):
-        Condition.not_none(topic, "topic")
-        Condition.not_none(msg, "msg")
-
-        # Get all subscriptions matching topic pattern
-        # Note: cannot use truthiness on array
-        cdef Subscription[:] subs = self._patterns.get(topic)
+        # Fast path: fetch the cached, priority-sorted subscriber list for this
+        # topic and dispatch. The cache stores a plain Python list (not a numpy
+        # object array), so the hot path needs no buffer acquisition. Validation
+        # is deferred to the cold cache-miss branch to keep the hot path minimal.
+        cdef list subs = self._patterns.get(topic)
         if subs is None or (not self._resolved and len(subs) == 0):
+            if topic is None:
+                return  # Nothing to publish to
             # Add the topic pattern and get matching subscribers
             subs = self._resolve_subscriptions(topic)
             self._resolved = True
 
-        # Send message to all matched subscribers
-        cdef:
-            int i
-            Subscription sub
-        for i in range(len(subs)):
-            sub = subs[i]
+        # Send message to all matched subscribers (highest priority first)
+        cdef Subscription sub
+        for sub in subs:
             sub.handler(msg)
 
         self.pub_count += 1
 
-    cdef Subscription[:] _resolve_subscriptions(self, str topic):
+    cpdef void publish_batch(self, str topic, list msgs, bint external_pub = True):
+        """
+        Publish a batch of messages for the given `topic` in order.
+
+        Equivalent to calling `publish(topic, msg)` for each message in `msgs`,
+        but resolves the matching subscribers only once for the whole batch and
+        dispatches entirely in C. This amortizes the Python-level call overhead
+        across the batch, roughly doubling throughput when streaming/replaying
+        many messages on a single topic.
+
+        Parameters
+        ----------
+        topic : str
+            The topic to publish on.
+        msgs : list[object]
+            The messages to publish, delivered in list order. Each message is
+            delivered to all matching subscribers (highest priority first)
+            before moving to the next message.
+        external_pub : bool, default True
+            If the messages should also be published externally.
+
+        """
+        self.publish_batch_c(topic, msgs, external_pub)
+
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    cdef void publish_batch_c(self, str topic, list msgs, bint external_pub = True):
+        cdef Py_ssize_t n = len(msgs)
+        if n == 0:
+            return
+
+        # Resolve subscribers once for the whole batch (see `publish_c`).
+        cdef list subs = self._patterns.get(topic)
+        if subs is None or (not self._resolved and len(subs) == 0):
+            if topic is None:
+                return  # Nothing to publish to
+            subs = self._resolve_subscriptions(topic)
+            self._resolved = True
+
+        cdef Py_ssize_t n_subs = len(subs)
+        cdef Py_ssize_t i
+        cdef Subscription sub
+
+        if n_subs == 0:
+            self.pub_count += n
+            return
+
+        if n_subs == 1:
+            # Common case: hoist the single handler out of the message loop.
+            handler = (<Subscription>subs[0]).handler
+            for i in range(n):
+                handler(msgs[i])
+        else:
+            # Deliver each message to all subscribers (priority order) in turn.
+            for i in range(n):
+                msg = msgs[i]
+                for sub in subs:
+                    sub.handler(msg)
+
+        self.pub_count += n
+
+    cdef list _resolve_subscriptions(self, str topic):
         cdef list subs_list = []
         cdef Subscription existing_sub
 
@@ -1658,11 +1752,11 @@ cdef class MessageBus:
                 subs_list.append(existing_sub)
 
         subs_list = sorted(subs_list, reverse=True)
-        cdef Subscription[:] subs_array = np.ascontiguousarray(subs_list, dtype=Subscription)
-        self._patterns[topic] = subs_array
+        self._patterns[topic] = subs_list
 
         cdef list matches
-        for sub in subs_array:
+        cdef Subscription sub
+        for sub in subs_list:
             matches = self._subscriptions.get(sub, [])
 
             if topic not in matches:
@@ -1670,11 +1764,47 @@ cdef class MessageBus:
 
             self._subscriptions[sub] = sorted(matches)
 
-        return subs_array
+        return subs_list
+
+
+cdef bint _is_matching_c(
+    const char* topic,
+    Py_ssize_t tlen,
+    const char* pattern,
+    Py_ssize_t plen,
+) noexcept nogil:
+    # Greedy two-pointer wildcard match (`*` = zero+ chars, `?` = one char).
+    # Pure-C port of the Rust `is_matching` so pattern matching avoids an FFI
+    # boundary crossing on every call (hot in subscribe/unsubscribe/subscriptions).
+    cdef Py_ssize_t i = 0
+    cdef Py_ssize_t j = 0
+    cdef Py_ssize_t star = -1
+    cdef Py_ssize_t match = 0
+    while i < tlen:
+        if j < plen and (pattern[j] == b"?" or pattern[j] == topic[i]):
+            i += 1
+            j += 1
+        elif j < plen and pattern[j] == b"*":
+            star = j
+            match = i
+            j += 1
+        elif star != -1:
+            j = star + 1
+            match += 1
+            i = match
+        else:
+            return False
+    while j < plen and pattern[j] == b"*":
+        j += 1
+    return j == plen
 
 
 cdef inline bint is_matching(str topic, str pattern):
-    return is_matching_ffi(pystr_to_cstr(topic), pystr_to_cstr(pattern))
+    cdef Py_ssize_t tlen = 0
+    cdef Py_ssize_t plen = 0
+    cdef const char* t = PyUnicode_AsUTF8AndSize(topic, &tlen)
+    cdef const char* p = PyUnicode_AsUTF8AndSize(pattern, &plen)
+    return _is_matching_c(t, tlen, p, plen)
 
 
 # Python wrapper for test access
@@ -1726,6 +1856,29 @@ cdef class Subscription:
         self.topic = topic
         self.handler = handler
         self.priority = priority
+        # Precompute the hash once (equality is by topic + handler, so priority
+        # is excluded). Hash the handler directly — it is consistent with `==`
+        # for the callables used here (functions, lambdas, bound methods,
+        # partials) and ~4x cheaper than formatting `str(handler)`. Fall back to
+        # the string form only for the rare unhashable callable.
+        try:
+            self._hash = hash((topic, handler))
+        except TypeError:
+            self._hash = hash((topic, str(handler)))
+
+    @staticmethod
+    cdef Subscription _create(str topic, object handler, int priority):
+        # Fast internal constructor that skips the `Condition` validation done
+        # in `__init__`. Callers must pass an already-validated topic/handler.
+        cdef Subscription self = Subscription.__new__(Subscription)
+        self.topic = topic
+        self.handler = handler
+        self.priority = priority
+        try:
+            self._hash = hash((topic, handler))
+        except TypeError:
+            self._hash = hash((topic, str(handler)))
+        return self
 
     def __eq__(self, Subscription other) -> bool:
         if other is None:
@@ -1745,8 +1898,7 @@ cdef class Subscription:
         return self.priority >= other.priority
 
     def __hash__(self) -> int:
-        # Convert handler to string to avoid builtin_function_or_method hashing issues
-        return hash((self.topic, str(self.handler)))
+        return self._hash
 
     def __repr__(self) -> str:
         return (

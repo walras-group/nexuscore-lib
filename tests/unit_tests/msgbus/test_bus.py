@@ -468,3 +468,57 @@ def test_streaming_type_registration(bus):
     assert bus.is_streaming_type(int)
     assert int in bus.streaming_types()
 
+
+
+def test_publish_batch_delivers_all_messages_in_order(bus):
+    # Arrange
+    received = []
+    bus.subscribe(topic="data.*", handler=received.append)
+
+    # Act
+    bus.publish_batch("data.quotes", ["a", "b", "c"])
+
+    # Assert
+    assert received == ["a", "b", "c"]
+    assert bus.pub_count == 3
+
+
+def test_publish_batch_matches_publish_loop_with_multiple_subscribers(bus):
+    # Arrange
+    order = []
+    bus.subscribe(topic="orders", handler=lambda m: order.append(("low", m)), priority=1)
+    bus.subscribe(topic="orders", handler=lambda m: order.append(("high", m)), priority=10)
+
+    # Act
+    bus.publish_batch("orders", ["m1", "m2"])
+
+    # Assert: each message delivered to all subscribers (priority order) before the next
+    assert order == [("high", "m1"), ("low", "m1"), ("high", "m2"), ("low", "m2")]
+
+
+def test_publish_batch_with_no_subscribers_still_counts(bus):
+    # Arrange, Act
+    bus.publish_batch("no.subscribers", ["x", "y"])
+    bus.publish_batch("no.subscribers", [])
+
+    # Assert
+    assert bus.pub_count == 2
+
+
+def test_publish_batch_equivalent_to_sequential_publish(bus, trader_id, clock):
+    # Arrange
+    loop_bus = MessageBus(trader_id=trader_id, clock=clock)
+    got_loop = []
+    got_batch = []
+    loop_bus.subscribe("data.quotes.*", got_loop.append)
+    bus.subscribe("data.quotes.*", got_batch.append)
+    msgs = [f"msg{i}" for i in range(10)]
+
+    # Act
+    for m in msgs:
+        loop_bus.publish("data.quotes.BTC", m)
+    bus.publish_batch("data.quotes.BTC", msgs)
+
+    # Assert
+    assert got_batch == got_loop == msgs
+    assert bus.pub_count == loop_bus.pub_count == 10

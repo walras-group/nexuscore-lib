@@ -135,7 +135,9 @@ cdef str RES
 cdef class MessageBus:
     cdef Clock _clock
     cdef dict[Subscription, list[str]] _subscriptions
-    cdef dict[str, Subscription[:]] _patterns
+    cdef dict[str, list] _patterns
+    cdef list _topics_cache
+    cdef dict _query_cache
     cdef dict[str, object] _endpoints
     cdef dict[UUID4, object] _correlation_index
     cdef tuple[type] _publishable_types
@@ -177,13 +179,19 @@ cdef class MessageBus:
     cpdef void unsubscribe(self, str topic, handler)
     cpdef void publish(self, str topic, msg, bint external_pub=*)
     cdef void publish_c(self, str topic, msg, bint external_pub=*)
-    cdef Subscription[:] _resolve_subscriptions(self, str topic)
+    cpdef void publish_batch(self, str topic, list msgs, bint external_pub=*)
+    cdef void publish_batch_c(self, str topic, list msgs, bint external_pub=*)
+    cdef list _resolve_subscriptions(self, str topic)
 
 
 cdef class Subscription:
+    cdef Py_hash_t _hash
     cdef readonly str topic
     """The topic for the subscription.\n\n:returns: `str`"""
     cdef readonly object handler
     """The handler for the subscription.\n\n:returns: `Callable`"""
     cdef readonly int priority
     """The priority for the subscription.\n\n:returns: `int`"""
+
+    @staticmethod
+    cdef Subscription _create(str topic, object handler, int priority)

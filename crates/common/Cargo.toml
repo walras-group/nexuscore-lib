@@ -45,7 +45,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 derive_builder = { workspace = true }
-futures = { workspace = true }
+futures = { workspace = true, features = ["executor"] }
 indexmap = { workspace = true }
 log = { workspace = true }
 regex = { workspace = true }
@@ -66,6 +66,11 @@ tracing-subscriber = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
+rand = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
 
 [build-dependencies]
 cbindgen = { workspace = true, optional = true }
