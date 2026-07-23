@@ -28,23 +28,12 @@ except Exception:  # pragma: no cover
     pd = None
     is_datetime64_ns_dtype = None
 
-from nexuscore.core.rust.core cimport micros_to_nanos as _micros_to_nanos
-from nexuscore.core.rust.core cimport millis_to_nanos as _millis_to_nanos
-from nexuscore.core.rust.core cimport nanos_to_micros as _nanos_to_micros
-from nexuscore.core.rust.core cimport nanos_to_millis as _nanos_to_millis
-from nexuscore.core.rust.core cimport nanos_to_secs as _nanos_to_secs
-from nexuscore.core.rust.core cimport secs_to_millis as _secs_to_millis
-from nexuscore.core.rust.core cimport secs_to_nanos as _secs_to_nanos
-
 cimport cpython.datetime
 from cpython.datetime cimport datetime
 from cpython.datetime cimport datetime_tzinfo
 from libc.stdint cimport uint64_t
 
 from nexuscore.core.correctness cimport Condition
-from nexuscore.core.rust.core cimport unix_nanos_to_iso8601_cstr
-from nexuscore.core.rust.core cimport unix_nanos_to_iso8601_millis_cstr
-from nexuscore.core.string cimport cstr_to_pystr
 
 
 # UNIX epoch is the UTC time at 00:00:00 on 1/1/1970
@@ -53,31 +42,39 @@ cdef datetime UNIX_EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
 
 
 cpdef uint64_t secs_to_nanos(double secs):
-    return _secs_to_nanos(secs)
+    if secs < 0:
+        return 0
+    return <uint64_t>(secs * 1_000_000_000.0)
 
 
 cpdef uint64_t secs_to_millis(double secs):
-    return _secs_to_millis(secs)
+    if secs < 0:
+        return 0
+    return <uint64_t>(secs * 1_000.0)
 
 
 cpdef uint64_t millis_to_nanos(double millis):
-    return _millis_to_nanos(millis)
+    if millis < 0:
+        return 0
+    return <uint64_t>(millis * 1_000_000.0)
 
 
 cpdef uint64_t micros_to_nanos(double micros):
-    return _micros_to_nanos(micros)
+    if micros < 0:
+        return 0
+    return <uint64_t>(micros * 1_000.0)
 
 
 cpdef double nanos_to_secs(uint64_t nanos):
-    return _nanos_to_secs(nanos)
+    return nanos / 1_000_000_000.0
 
 
 cpdef uint64_t nanos_to_millis(uint64_t nanos):
-    return _nanos_to_millis(nanos)
+    return nanos // 1_000_000
 
 
 cpdef uint64_t nanos_to_micros(uint64_t nanos):
-    return _nanos_to_micros(nanos)
+    return nanos // 1_000
 
 
 cdef inline datetime _as_utc_datetime(datetime dt_obj):
@@ -107,7 +104,7 @@ cpdef unix_nanos_to_dt(uint64_t nanos):
     datetime
 
     """
-    return dt.datetime.fromtimestamp(nanos / 1_000_000_000, tz=dt.timezone.utc)
+    return dt.datetime.fromtimestamp(nanos / 1e9, tz=dt.timezone.utc)
 
 
 cpdef dt_to_unix_nanos(dt_value):
@@ -175,10 +172,12 @@ cpdef str unix_nanos_to_iso8601(uint64_t unix_nanos, bint nanos_precision = True
     str
 
     """
+    cdef uint64_t secs = unix_nanos // 1_000_000_000
+    cdef uint64_t frac = unix_nanos % 1_000_000_000
+    cdef str base = dt.datetime.fromtimestamp(secs, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     if nanos_precision:
-        return cstr_to_pystr(unix_nanos_to_iso8601_cstr(unix_nanos))
-    else:
-        return cstr_to_pystr(unix_nanos_to_iso8601_millis_cstr(unix_nanos))
+        return f"{base}.{frac:09d}Z"
+    return f"{base}.{frac // 1_000_000:03d}Z"
 
 
 cpdef str format_iso8601(datetime dt_value, bint nanos_precision = True):
@@ -200,9 +199,7 @@ cpdef str format_iso8601(datetime dt_value, bint nanos_precision = True):
     Condition.not_none(dt_value, "dt")
 
     cdef uint64_t nanos = dt_to_unix_nanos(dt_value)
-    if nanos_precision:
-        return cstr_to_pystr(unix_nanos_to_iso8601_cstr(nanos))
-    return cstr_to_pystr(unix_nanos_to_iso8601_millis_cstr(nanos))
+    return unix_nanos_to_iso8601(nanos, nanos_precision)
 
 
 cpdef str format_optional_iso8601(datetime dt_value, bint nanos_precision = True):
@@ -248,7 +245,7 @@ cpdef maybe_unix_nanos_to_dt(nanos):
     if nanos is None:
         return None
     else:
-        return dt.datetime.fromtimestamp(nanos / 1_000_000_000, tz=dt.timezone.utc)
+        return dt.datetime.fromtimestamp(nanos / 1e9, tz=dt.timezone.utc)
 
 
 cpdef maybe_dt_to_unix_nanos(dt_value):

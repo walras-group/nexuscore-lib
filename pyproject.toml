@@ -1,19 +1,25 @@
 [build-system]
-requires = ["setuptools>=80", "wheel", "cython==3.2.4", "numpy>=1.26.4"]
+requires = ["setuptools>=80", "wheel", "cython==3.2.4"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "nexuscore-lib"
-version = "0.2.1"
+version = "0.3.0"
 requires-python = ">=3.11"
-dependencies = ["numpy>=1.26.4"]
+dependencies = []
 readme = { file = "README.md", content-type = "text/markdown" }
 
 [tool.setuptools]
-packages = ["nexuscore", "nexuscore.core", "nexuscore.core.includes", "nexuscore.core.rust", "nexuscore.model", "nexuscore.common", "nexuscore.serialization"]
+packages = ["nexuscore", "nexuscore.core", "nexuscore.model", "nexuscore.common", "nexuscore.serialization"]
+# Ship only the compiled .so plus the declaration/stub files below; keep the
+# generated .c intermediates and .pyx sources out of the binary wheel.
+include-package-data = false
 
 [tool.setuptools.package-data]
-"nexuscore" = ["**/*.pxd", "**/*.pyx", "**/*.pyi", "**/*.h", "**/*.so", "**/*.dylib", "**/*.pyd"]
+"nexuscore" = ["**/*.pxd", "**/*.pyi"]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "cython>=3.2.8",
+    "pytest>=8",
+]

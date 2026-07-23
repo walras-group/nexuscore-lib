@@ -13,13 +13,9 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
-from libc.string cimport strcmp
+import sys
 
 from nexuscore.core.correctness cimport Condition
-from nexuscore.core.rust.model cimport component_id_new
-from nexuscore.core.rust.model cimport trader_id_new
-from nexuscore.core.string cimport pystr_to_cstr
-from nexuscore.core.string cimport ustr_to_pystr
 
 
 cdef class Identifier:
@@ -105,33 +101,28 @@ cdef class TraderId(Identifier):
 
     def __init__(self, str value not None) -> None:
         Condition.valid_string(value, "value")
-        self._mem = trader_id_new(pystr_to_cstr(value))
+        Condition.is_true("-" in value, f"invalid string for 'value' did not contain '-', was '{value}'")
+        self._value = sys.intern(value)
 
     def __getstate__(self):
-        return self.to_str()
+        return self._value
 
     def __setstate__(self, state):
-        self._mem = trader_id_new(pystr_to_cstr(state))
+        self._value = sys.intern(state)
 
     def __eq__(self, TraderId other) -> bool:
         if other is None:
             return False
-        return strcmp(self._mem._0, other._mem._0) == 0
+        return self._value == other._value
 
     def __hash__(self) -> int:
         # A rare zero hash will cause frequent recomputations
         if self._hash == 0:
-            self._hash = hash(self.to_str())
+            self._hash = hash(self._value)
         return self._hash
 
-    @staticmethod
-    cdef TraderId from_mem_c(TraderId_t mem):
-        cdef TraderId trader_id = TraderId.__new__(TraderId)
-        trader_id._mem = mem
-        return trader_id
-
     cdef str to_str(self):
-        return ustr_to_pystr(self._mem._0)
+        return self._value
 
     cpdef str get_tag(self):
         """
@@ -142,7 +133,7 @@ cdef class TraderId(Identifier):
         str
 
         """
-        return self.to_str().split("-")[-1]
+        return self._value.split("-")[-1]
 
 
 cdef class ComponentId(Identifier):
@@ -166,30 +157,24 @@ cdef class ComponentId(Identifier):
 
     def __init__(self, str value not None) -> None:
         Condition.valid_string(value, "value")
-        self._mem = component_id_new(pystr_to_cstr(value))
+        self._value = sys.intern(value)
 
     def __getstate__(self):
-        return self.to_str()
+        return self._value
 
     def __setstate__(self, state):
-        self._mem = component_id_new(pystr_to_cstr(state))
+        self._value = sys.intern(state)
 
     def __eq__(self, ComponentId other) -> bool:
         if other is None:
             return False
-        return strcmp(self._mem._0, other._mem._0) == 0
+        return self._value == other._value
 
     def __hash__(self) -> int:
         # A rare zero hash will cause frequent recomputations
         if self._hash == 0:
-            self._hash = hash(self.to_str())
+            self._hash = hash(self._value)
         return self._hash
 
-    @staticmethod
-    cdef ComponentId from_mem_c(ComponentId_t mem):
-        cdef ComponentId component_id = ComponentId.__new__(ComponentId)
-        component_id._mem = mem
-        return component_id
-
     cdef str to_str(self):
-        return ustr_to_pystr(self._mem._0)
+        return self._value

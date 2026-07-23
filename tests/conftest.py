@@ -1,12 +1,12 @@
 import pytest
 
-from nexuscore import TestClock
+from nexuscore import LiveClock
 from nexuscore import TraderId
 
 
 @pytest.fixture
 def clock():
-    return TestClock()
+    return LiveClock()
 
 
 @pytest.fixture

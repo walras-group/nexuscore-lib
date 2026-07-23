@@ -1,25 +1,24 @@
 # nexuscore-lib
 
 Core runtime components extracted from `nautilus_trader` for use in Walras.
+Pure Cython + Python standard library — no Rust or other native dependencies.
 
 ## Features
-- Message bus and clocks: `MessageBus`, `LiveClock`, `TestClock`, `Clock`, `TimeEvent`
+- Message bus and clock: `MessageBus`, `LiveClock`, `Clock`, `TimeEvent`
 - Identifiers: `TraderId`, `ComponentId`, `Identifier`, `UUID4`
-- Cryptography: `hmac_signature`, `rsa_signature`, `ed25519_signature`
+- Cryptography: `hmac_signature` (HMAC-SHA256), `HmacSigner`
 
 ## Usage
 ```python
 from nexuscore import (
     MessageBus,
     LiveClock,
-    TestClock,
     Clock,
     TimeEvent,
     TraderId,
     ComponentId,
     UUID4,
     hmac_signature,
-    rsa_signature,
-    ed25519_signature,
+    HmacSigner,
 )
 ```

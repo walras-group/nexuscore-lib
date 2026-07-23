@@ -1,5 +1,3 @@
-include nexuscore_build.py
-include Cargo.toml
-include Cargo.lock
-include rust-toolchain.toml
-recursive-include crates *
+# Sources needed to build the extensions from an sdist (Cython -> C -> .so).
+recursive-include nexuscore *.pyx *.pxd *.pyi
+include setup.py

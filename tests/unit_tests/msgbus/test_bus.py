@@ -17,7 +17,7 @@ import pytest
 
 from nexuscore import MessageBus
 from nexuscore import UUID4
-from nexuscore.common.component import is_matching_py
+from nexuscore.common.msgbus import is_matching_py
 
 
 

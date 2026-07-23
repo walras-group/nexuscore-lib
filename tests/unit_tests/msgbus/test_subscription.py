@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
-from nexuscore.common.component import Subscription
+from nexuscore.common.msgbus import Subscription
 
 
 def test_comparisons_returns_expected():

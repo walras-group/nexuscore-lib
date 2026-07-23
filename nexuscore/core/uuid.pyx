@@ -13,17 +13,10 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+import os
 import uuid
 
 from nexuscore.core.correctness cimport Condition
-from nexuscore.core.rust.core cimport UUID4_t
-from nexuscore.core.rust.core cimport uuid4_eq
-from nexuscore.core.rust.core cimport uuid4_from_cstr
-from nexuscore.core.rust.core cimport uuid4_hash
-from nexuscore.core.rust.core cimport uuid4_new
-from nexuscore.core.rust.core cimport uuid4_to_cstr
-from nexuscore.core.string cimport cstr_to_pystr
-from nexuscore.core.string cimport pystr_to_cstr
 
 
 cdef class UUID4:
@@ -37,40 +30,41 @@ cdef class UUID4:
     """
 
     def __init__(self):
-        self._mem = uuid4_new()
+        # Equivalent to `str(uuid.uuid4())` but skips the intermediate `uuid.UUID`
+        # object: draw 16 CSPRNG bytes, set the version (4) and RFC 4122 variant
+        # bits, then format as the canonical 8-4-4-4-12 lowercase hex string.
+        cdef bytearray b = bytearray(os.urandom(16))
+        b[6] = (b[6] & 0x0F) | 0x40
+        b[8] = (b[8] & 0x3F) | 0x80
+        cdef str h = b.hex()
+        self._value = f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
 
     def __getstate__(self):
-        return self.to_str()
+        return self._value
 
     def __setstate__(self, state):
-        self._mem = uuid4_from_cstr(pystr_to_cstr(state))
+        self._value = state
 
     def __eq__(self, UUID4 other) -> bool:
         if other is None:
             return False
-        return uuid4_eq(&self._mem, &other._mem)
+        return self._value == other._value
 
     def __hash__(self) -> int:
-        return uuid4_hash(&self._mem)
+        return hash(self._value)
 
     def __str__(self) -> str:
-        return self.to_str()
+        return self._value
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}('{self}')"
+        return f"{type(self).__name__}('{self._value}')"
 
     cdef str to_str(self):
-        return cstr_to_pystr(uuid4_to_cstr(&self._mem), False)
+        return self._value
 
     @property
     def value(self) -> str:
-        return self.to_str()
-
-    @staticmethod
-    cdef UUID4 from_mem_c(UUID4_t mem):
-        cdef UUID4 uuid4 = UUID4.__new__(UUID4)
-        uuid4._mem = mem
-        return uuid4
+        return self._value
 
     @staticmethod
     cdef UUID4 from_str_c(str value):
@@ -80,7 +74,7 @@ cdef class UUID4:
         Condition.is_true(uuid_obj.variant == uuid.RFC_4122, "UUID value is not RFC 4122")
 
         cdef UUID4 uuid4 = UUID4.__new__(UUID4)
-        uuid4._mem = uuid4_from_cstr(pystr_to_cstr(value))
+        uuid4._value = str(uuid_obj)
         return uuid4
 
     @staticmethod

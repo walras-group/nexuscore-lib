@@ -15,26 +15,18 @@
 
 from libc.stdint cimport int64_t
 
-from nexuscore.core.rust.model cimport ComponentId_t
-from nexuscore.core.rust.model cimport TraderId_t
-
 
 cdef class Identifier:
     cdef int64_t _hash
+    cdef str _value
+
     cdef str to_str(self)
 
 
 cdef class TraderId(Identifier):
-    cdef TraderId_t _mem
-
-    @staticmethod
-    cdef TraderId from_mem_c(TraderId_t mem)
 
     cpdef str get_tag(self)
 
 
 cdef class ComponentId(Identifier):
-    cdef ComponentId_t _mem
-
-    @staticmethod
-    cdef ComponentId from_mem_c(ComponentId_t mem)
+    pass

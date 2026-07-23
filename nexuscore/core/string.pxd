@@ -13,9 +13,6 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
-from nexuscore.core.rust.core cimport cstr_drop
-
-
 cdef extern from "Python.h":
     # Similar to PyUnicode_FromUnicode(), but u points to null-terminated
     # UTF-8 encoded bytes. The size is determined with strlen().
@@ -57,28 +54,8 @@ cdef extern from "Python.h":
     char* PyBytes_AsString(object string) except NULL
 
 
-cdef inline str cstr_to_pystr(const char* ptr, bint drop = True):
-    cdef str obj = PyUnicode_FromString(ptr)
-
-    # Assumes `ptr` was created from Rust `CString::from_raw`,
-    # otherwise will lead to undefined behavior when passed to `cstr_drop`.
-    if drop:
-        cstr_drop(ptr)
-    return obj
-
-
-# Convert a Rust interned string to a Python string
 cdef inline str ustr_to_pystr(const char* ptr):
     return PyUnicode_FromString(ptr)
-
-
-cdef inline bytes cstr_to_pybytes(const char* ptr):
-    cdef bytes obj = PyBytes_FromString(ptr)
-
-    # Assumes `ptr` was created from Rust `CString::from_raw`,
-    # otherwise will lead to undefined behavior when passed to `cstr_drop`.
-    cstr_drop(ptr)
-    return obj
 
 
 cdef inline const char* pystr_to_cstr(str value):
